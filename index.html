@@ -1,0 +1,855 @@
+<title>Spectrum Pixel Painter</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@400;500;600&display=swap">
+<style>
+/* Layout: one-screen tool. Toolbar (palette + tools + file) on top, canvas well fills the rest, status line at the bottom. */
+:root {
+  --bg: #14151a;
+  --panel: #1c1e25;
+  --well: #0d0e12;
+  --line: #2d303a;
+  --fg: #e4e6eb;
+  --muted: #8a8f9c;
+  --accent: #5fd0dc;
+  --warn: #f0b84a;
+  --ui: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--ui); font-size: 14px;
+  overflow: hidden;
+}
+.app {
+  height: 100%; box-sizing: border-box;
+  display: grid; grid-template-rows: auto 1fr auto; gap: 10px;
+  padding-inline: 16px; padding-block: 12px;
+}
+.bar {
+  display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 24px;
+}
+.group { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.label {
+  font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+  margin-bottom: 6px;
+}
+.palette { display: flex; gap: 10px; align-items: flex-start; }
+.grid { display: grid; grid-template-columns: repeat(10, 30px); gap: 4px; }
+.swatch {
+  position: relative; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 3px;
+  cursor: pointer; box-shadow: inset 0 0 0 1px rgba(255,255,255,.12);
+}
+.swatch .key {
+  position: absolute; left: 2px; bottom: 1px; font: 500 9px/1 var(--mono);
+  pointer-events: none;
+}
+.swatch.sel { outline: 2px solid var(--accent); outline-offset: 2px; }
+.swatch:focus-visible { outline: 2px dashed var(--fg); outline-offset: 2px; }
+.swatch.trans::after {
+  content: ""; position: absolute; right: 0; top: 0; width: 13px; height: 13px; border-top-right-radius: 3px;
+  background: conic-gradient(#ddd 25%, #888 0 50%, #ddd 0 75%, #888 0) 0 0 / 6px 6px;
+  clip-path: polygon(0 0, 100% 0, 100% 100%);
+}
+.tools { display: flex; gap: 4px; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 30px; padding: 0 10px; border-radius: 4px;
+  background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+  font: 500 13px var(--ui); cursor: pointer;
+}
+.btn:hover { border-color: var(--muted); }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.btn.on { border-color: var(--accent); color: var(--accent); }
+.btn kbd {
+  font: 500 10px/1 var(--mono); color: var(--muted);
+  border: 1px solid var(--line); border-radius: 3px; padding: 2px 4px;
+}
+.btn.on kbd { color: var(--accent); border-color: var(--accent); }
+.file { margin-left: auto; }
+.well {
+  position: relative; min-height: 0; overflow: hidden;
+  background: var(--well); border: 1px solid var(--line); border-radius: 4px;
+}
+.well.drop { border-color: var(--accent); }
+canvas#view { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+canvas#view.grab { cursor: grab; }
+canvas#view.grabbing { cursor: grabbing; }
+.status {
+  display: flex; flex-wrap: nowrap; gap: 20px; align-items: baseline;
+  height: 18px; line-height: 18px; overflow: hidden; white-space: nowrap;
+  font: 12px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.status > span { flex: none; }
+#sPos { width: 16ch; }
+#sCol { width: 30ch; }
+#sZoom { width: 12ch; }
+.status .msg, .status .hint { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.status b { color: var(--fg); font-weight: 500; }
+.status .chip { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 6px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.2); }
+.status .dirty { color: var(--warn); }
+.status .msg { color: var(--accent); }
+.status .hint { margin-left: auto; }
+.tag { color: var(--warn); }
+@media (max-width: 700px) { .file { margin-left: 0; } }
+</style>
+
+<div class="app">
+  <div class="bar">
+    <div class="group">
+      <div>
+        <div class="label">Palette</div>
+        <div class="palette">
+          <div id="transSlot"></div>
+          <div class="grid" id="grid"></div>
+        </div>
+      </div>
+    </div>
+    <div class="group">
+      <div>
+        <div class="label">Tool</div>
+        <div class="tools">
+          <button class="btn" id="tPencil" data-tool="pencil">Pencil <kbd>B</kbd></button>
+          <button class="btn" id="tFill" data-tool="fill">Fill <kbd>G</kbd></button>
+          <button class="btn" id="tPick" data-tool="pick">Picker <kbd>I</kbd></button>
+        </div>
+      </div>
+    </div>
+    <div class="group file">
+      <div>
+        <div class="label">File</div>
+        <div class="tools">
+          <button class="btn" id="bOpen">Open <kbd>Ctrl O</kbd></button>
+          <button class="btn" id="bSave">Save <kbd>Ctrl S</kbd></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="well" id="well"><canvas id="view"></canvas></div>
+
+  <div class="status">
+    <span id="sFile"></span>
+    <span id="sPos">x –  y –</span>
+    <span id="sCol"></span>
+    <span id="sZoom"></span>
+    <span id="sMsg" class="msg"></span>
+    <span class="hint">Left paint · Right restore · Wheel zoom · Space or middle drag to pan · Home fits</span>
+  </div>
+</div>
+<input type="file" id="fileIn" accept="image/png,.png" hidden>
+
+<script>
+/*PNGCODEC-START*/
+const PNG = (() => {
+  const SIG = [137, 80, 78, 71, 13, 10, 26, 10];
+  const CHANNELS = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 };
+  const PASSES = [[0,0,8,8],[4,0,8,8],[0,4,4,8],[2,0,4,4],[0,2,2,4],[1,0,2,2],[0,1,1,2]];
+  const CRC = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+    return t;
+  })();
+  function crc32(parts) {
+    let c = 0xFFFFFFFF;
+    for (const b of parts) for (let i = 0; i < b.length; i++) c = CRC[(c ^ b[i]) & 255] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+  async function pump(bytes, Stream) {
+    const s = new Blob([bytes]).stream().pipeThrough(new Stream('deflate'));
+    return new Uint8Array(await new Response(s).arrayBuffer());
+  }
+  function passes(w, h, interlace) {
+    if (!interlace) return [{ xs: 0, ys: 0, dx: 1, dy: 1, pw: w, ph: h }];
+    return PASSES.map(([xs, ys, dx, dy]) => ({ xs, ys, dx, dy,
+      pw: Math.max(0, Math.ceil((w - xs) / dx)), ph: Math.max(0, Math.ceil((h - ys) / dy)) }));
+  }
+  function paeth(a, b, c) {
+    const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+  }
+  function unfilter(f, cur, prev, bpp) {
+    const n = cur.length;
+    if (f === 0) return;
+    for (let i = 0; i < n; i++) {
+      const a = i >= bpp ? cur[i - bpp] : 0, b = prev[i], c = i >= bpp ? prev[i - bpp] : 0;
+      let p;
+      if (f === 1) p = a; else if (f === 2) p = b; else if (f === 3) p = (a + b) >> 1;
+      else if (f === 4) p = paeth(a, b, c); else throw new Error('The PNG has a corrupt row filter.');
+      cur[i] = (cur[i] + p) & 255;
+    }
+  }
+  function filterRow(f, cur, prev, bpp, out) {
+    for (let i = 0; i < cur.length; i++) {
+      const a = i >= bpp ? cur[i - bpp] : 0, b = prev[i], c = i >= bpp ? prev[i - bpp] : 0;
+      const p = f === 0 ? 0 : f === 1 ? a : f === 2 ? b : f === 3 ? (a + b) >> 1 : paeth(a, b, c);
+      out[i] = (cur[i] - p) & 255;
+    }
+  }
+  function readSample(row, i, depth) {
+    if (depth === 8) return row[i];
+    if (depth === 16) return (row[2 * i] << 8) | row[2 * i + 1];
+    const bit = i * depth;
+    return (row[bit >> 3] >> (8 - depth - (bit & 7))) & ((1 << depth) - 1);
+  }
+  function writeSample(row, i, depth, v) {
+    if (depth === 8) { row[i] = v; return; }
+    if (depth === 16) { row[2 * i] = v >> 8; row[2 * i + 1] = v & 255; return; }
+    const bit = i * depth;
+    row[bit >> 3] |= v << (8 - depth - (bit & 7));
+  }
+
+  async function decode(buffer) {
+    const b = new Uint8Array(buffer);
+    for (let i = 0; i < 8; i++) if (b[i] !== SIG[i]) throw new Error('This file is not a PNG.');
+    const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+    const chunks = [];
+    let p = 8;
+    while (p + 8 <= b.length) {
+      const len = dv.getUint32(p);
+      const type = String.fromCharCode(b[p + 4], b[p + 5], b[p + 6], b[p + 7]);
+      chunks.push({ type, data: b.slice(p + 8, p + 8 + len) });
+      p += 12 + len;
+      if (type === 'IEND') break;
+    }
+    const ihdr = chunks.find(c => c.type === 'IHDR');
+    if (!ihdr) throw new Error('The PNG has no header.');
+    const hv = new DataView(ihdr.data.buffer);
+    const w = hv.getUint32(0), h = hv.getUint32(4);
+    const depth = ihdr.data[8], ct = ihdr.data[9], interlace = ihdr.data[12];
+    const ch = CHANNELS[ct];
+    if (!ch) throw new Error('The PNG uses an unknown colour type.');
+    const firstIdat = chunks.findIndex(c => c.type === 'IDAT');
+    if (firstIdat < 0) throw new Error('The PNG has no image data.');
+    const pre = chunks.slice(0, firstIdat).filter(c => c.type !== 'IHDR');
+    const post = chunks.slice(firstIdat).filter(c => c.type !== 'IDAT' && c.type !== 'IEND');
+    const idats = chunks.filter(c => c.type === 'IDAT');
+    const zlen = idats.reduce((s, c) => s + c.data.length, 0);
+    const z = new Uint8Array(zlen); let zo = 0;
+    for (const c of idats) { z.set(c.data, zo); zo += c.data.length; }
+    const raw = await pump(z, DecompressionStream);
+
+    const bitsPP = ch * depth, bpp = Math.max(1, bitsPP >> 3);
+    const samples = new Uint16Array(w * h * ch);
+    let rp = 0;
+    for (const ps of passes(w, h, interlace)) {
+      if (!ps.pw || !ps.ph) continue;
+      const rowBytes = Math.ceil(ps.pw * bitsPP / 8);
+      let prev = new Uint8Array(rowBytes);
+      for (let y = 0; y < ps.ph; y++) {
+        const f = raw[rp++];
+        const cur = raw.slice(rp, rp + rowBytes); rp += rowBytes;
+        unfilter(f, cur, prev, bpp);
+        const iy = ps.ys + y * ps.dy;
+        for (let x = 0; x < ps.pw; x++) {
+          const base = (iy * w + ps.xs + x * ps.dx) * ch;
+          for (let c = 0; c < ch; c++) samples[base + c] = readSample(cur, x * ch + c, depth);
+        }
+        prev = cur;
+      }
+    }
+
+    // Build the colour table: one entry per distinct pixel value.
+    const plte = chunks.find(c => c.type === 'PLTE');
+    const trns = chunks.find(c => c.type === 'tRNS');
+    const maxv = (1 << depth) - 1;
+    const to8 = v => depth === 16 ? v >> 8 : depth === 8 ? v : Math.round(v * 255 / maxv);
+    const entries = [];
+    const pix = new Uint32Array(w * h);
+    const img = { w, h, depth, ct, ch, interlace, ihdr: ihdr.data, pre, post, entries, pix };
+    if (ct === 3) {
+      if (!plte) throw new Error('The indexed PNG has no palette.');
+      const n = plte.data.length / 3;
+      for (let i = 0; i < n; i++) {
+        const a = trns && i < trns.data.length ? trns.data[i] : 255;
+        entries.push({ samples: [i], rgba: [plte.data[3 * i], plte.data[3 * i + 1], plte.data[3 * i + 2], a] });
+      }
+      for (let i = 0; i < w * h; i++) {
+        if (samples[i] >= n) throw new Error('The PNG uses a palette entry it does not define.');
+        pix[i] = samples[i];
+      }
+    } else {
+      const map = new Map();
+      for (let i = 0; i < w * h; i++) {
+        const base = i * ch;
+        let key;
+        if (depth <= 8) { key = 0; for (let c = 0; c < ch; c++) key = key * 256 + samples[base + c]; }
+        else { key = ''; for (let c = 0; c < ch; c++) key += samples[base + c] + ','; }
+        let e = map.get(key);
+        if (e === undefined) {
+          e = entries.length;
+          const s = Array.from(samples.subarray(base, base + ch));
+          entries.push({ samples: s, rgba: rgbaFor(img, s, trns, to8) });
+          map.set(key, e);
+        }
+        pix[i] = e;
+      }
+    }
+    img.to8 = to8; img.trns = trns;
+    return img;
+  }
+
+  function rgbaFor(img, s, trns, to8) {
+    const t = trns ? new DataView(trns.data.buffer) : null;
+    switch (img.ct) {
+      case 0: { const g = to8(s[0]); const a = t && t.byteLength >= 2 && t.getUint16(0) === s[0] ? 0 : 255; return [g, g, g, a]; }
+      case 2: { const a = t && t.byteLength >= 6 && t.getUint16(0) === s[0] && t.getUint16(2) === s[1] && t.getUint16(4) === s[2] ? 0 : 255;
+                return [to8(s[0]), to8(s[1]), to8(s[2]), a]; }
+      case 4: { const g = to8(s[0]); return [g, g, g, to8(s[1])]; }
+      case 6: return [to8(s[0]), to8(s[1]), to8(s[2]), to8(s[3])];
+    }
+  }
+
+  // Samples for an 8-bit RGB colour in this image's own format, or null if it can't be stored exactly.
+  function samplesFor(img, r, g, b) {
+    const { ct, depth } = img;
+    if (ct === 3) return null;
+    const grey = r === g && g === b;
+    const conv = v => depth === 16 ? v * 257 : depth === 8 ? v : null;
+    const max = (1 << depth) - 1;
+    if ((ct === 0 || ct === 4) && !grey) return null;
+    if (conv(r) === null) return null;
+    if (ct === 0) return [conv(r)];
+    if (ct === 4) return [conv(r), max];
+    if (ct === 2) return [conv(r), conv(g), conv(b)];
+    return [conv(r), conv(g), conv(b), max];
+  }
+
+  function chunk(type, data) {
+    const out = new Uint8Array(12 + data.length);
+    const dv = new DataView(out.buffer);
+    dv.setUint32(0, data.length);
+    const t = new Uint8Array([...type].map(c => c.charCodeAt(0)));
+    out.set(t, 4); out.set(data, 8);
+    dv.setUint32(8 + data.length, crc32([t, data]));
+    return out;
+  }
+
+  async function encode(img) {
+    const { w, h, depth, ch, ct, interlace, entries, pix } = img;
+    const bitsPP = ch * depth, bpp = Math.max(1, bitsPP >> 3);
+    const rows = [];
+    let total = 0;
+    const adaptive = !(ct === 3 || depth < 8);
+    for (const ps of passes(w, h, interlace)) {
+      if (!ps.pw || !ps.ph) continue;
+      const rowBytes = Math.ceil(ps.pw * bitsPP / 8);
+      let prev = new Uint8Array(rowBytes);
+      const tmp = new Uint8Array(rowBytes);
+      for (let y = 0; y < ps.ph; y++) {
+        const cur = new Uint8Array(rowBytes);
+        const iy = ps.ys + y * ps.dy;
+        for (let x = 0; x < ps.pw; x++) {
+          const s = entries[pix[iy * w + ps.xs + x * ps.dx]].samples;
+          for (let c = 0; c < ch; c++) writeSample(cur, x * ch + c, depth, s[c]);
+        }
+        let bestF = 0, best = null, bestScore = Infinity;
+        for (const f of adaptive ? [0, 1, 2, 3, 4] : [0]) {
+          filterRow(f, cur, prev, bpp, tmp);
+          let score = 0;
+          for (let i = 0; i < rowBytes; i++) score += tmp[i] < 128 ? tmp[i] : 256 - tmp[i];
+          if (score < bestScore) { bestScore = score; bestF = f; best = tmp.slice(); }
+        }
+        const row = new Uint8Array(rowBytes + 1);
+        row[0] = bestF; row.set(best, 1);
+        rows.push(row); total += row.length;
+        prev = cur;
+      }
+    }
+    const raw = new Uint8Array(total); let o = 0;
+    for (const r of rows) { raw.set(r, o); o += r.length; }
+    const z = await pump(raw, CompressionStream);
+    const parts = [new Uint8Array(SIG), chunk('IHDR', img.ihdr)];
+    for (const c of img.pre) parts.push(chunk(c.type, c.data));
+    parts.push(chunk('IDAT', z));
+    for (const c of img.post) parts.push(chunk(c.type, c.data));
+    parts.push(chunk('IEND', new Uint8Array(0)));
+    const len = parts.reduce((s, p) => s + p.length, 0);
+    const out = new Uint8Array(len); o = 0;
+    for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+  }
+
+  const TYPE_NAMES = { 0: 'Greyscale', 2: 'RGB', 3: 'Indexed', 4: 'Grey + alpha', 6: 'RGBA' };
+  function describe(img) {
+    return `${TYPE_NAMES[img.ct]} ${img.depth}-bit${img.interlace ? ', interlaced' : ''}`;
+  }
+  return { decode, encode, samplesFor, describe };
+})();
+/*PNGCODEC-END*/
+
+const TRANSPARENT_RGB = [100, 100, 100];   // #646464, the sheets' "transparent" colour
+const ZOOMS = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64, 80, 96, 128]; // device pixels per image pixel
+const MAX_SWATCHES = 240;
+const SAMPLE_NAME = 'dizzy1_PAINTING_SPRITES.png';
+const SAMPLE_B64 = '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';
+
+const $ = id => document.getElementById(id);
+const view = $('view'), well = $('well'), ctx = view.getContext('2d');
+const off = document.createElement('canvas'), offCtx = off.getContext('2d');
+let offImg = null;
+
+let img = null, orig = null;
+let pal = [], frameIdx = -1, transIdx = -1, cur = -1;
+let tool = 'pencil', prevTool = 'pencil';
+let undoStack = [], redoStack = [];
+let fileName = '', fileHandle = null, dirty = false;
+let z = 8, ox = 0, oy = 0;
+let hover = null;
+let spaceDown = false, pan = null, stroke = null;
+let dpr = window.devicePixelRatio || 1;
+let msgTimer = 0, openArmed = 0;
+
+const hex2 = v => v.toString(16).padStart(2, '0').toUpperCase();
+const hexOf = rgba => '#' + hex2(rgba[0]) + hex2(rgba[1]) + hex2(rgba[2]) + (rgba[3] < 255 ? hex2(rgba[3]) : '');
+const isTransRGB = rgba => rgba[0] === TRANSPARENT_RGB[0] && rgba[1] === TRANSPARENT_RGB[1] && rgba[2] === TRANSPARENT_RGB[2] && rgba[3] === 255;
+
+function say(text, ms = 3500) {
+  $('sMsg').textContent = text;
+  clearTimeout(msgTimer);
+  if (ms) msgTimer = setTimeout(() => { $('sMsg').textContent = ''; }, ms);
+}
+
+// ---------- loading ----------
+async function loadBytes(bytes, name, handle) {
+  let decoded;
+  try { decoded = await PNG.decode(bytes); }
+  catch (e) { say(`Couldn't open ${name}: ${e.message}`, 6000); return; }
+  img = decoded;
+  orig = img.pix.slice();
+  fileName = name; fileHandle = handle || null;
+  undoStack = []; redoStack = []; setDirty(false);
+
+  // Palette: every colour in the file, in order of first appearance.
+  const seen = new Uint8Array(img.entries.length), order = [];
+  for (let i = 0; i < img.pix.length; i++) { const v = img.pix[i]; if (!seen[v]) { seen[v] = 1; order.push(v); } }
+  frameIdx = img.pix[0];
+  transIdx = order.find(v => isTransRGB(img.entries[v].rgba));
+  if (transIdx === undefined) transIdx = img.entries.findIndex(e => isTransRGB(e.rgba));
+  if (transIdx < 0) {
+    const s = PNG.samplesFor(img, ...TRANSPARENT_RGB);
+    if (s) { transIdx = img.entries.length; img.entries.push({ samples: s, rgba: [...TRANSPARENT_RGB, 255] }); }
+  }
+  if (transIdx === frameIdx) transIdx = -1;
+  pal = order.filter(v => v !== frameIdx && v !== transIdx);
+
+  off.width = img.w; off.height = img.h;
+  offImg = offCtx.createImageData(img.w, img.h);
+  for (let i = 0; i < img.pix.length; i++) writeRGBA(i, img.pix[i]);
+  offCtx.putImageData(offImg, 0, 0);
+
+  cur = pal.length ? pal[0] : transIdx;
+  buildPalette();
+  fit();
+  updateFileStatus();
+  say(`Opened ${name}: ${pal.length} colours${transIdx >= 0 ? ' + transparent' : ''}, frame ${hexOf(img.entries[frameIdx].rgba)}`);
+}
+
+function writeRGBA(i, v) {
+  const c = img.entries[v].rgba, d = offImg.data, o = i * 4;
+  d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = c[3];
+}
+
+// ---------- palette UI ----------
+function keyLabel(n) {
+  if (n < 10) return String((n + 1) % 10);
+  if (n < 20) return '⇧' + ((n - 9) % 10);
+  return '';
+}
+function swatch(v, label, title) {
+  const b = document.createElement('button');
+  const c = img.entries[v].rgba;
+  b.className = 'swatch'; b.dataset.v = v;
+  b.style.background = `rgba(${c[0]},${c[1]},${c[2]},${c[3] / 255})`;
+  const lum = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+  b.innerHTML = `<span class="key" style="color:${lum > 140 ? '#000' : '#fff'}">${label}</span>`;
+  b.title = title;
+  b.addEventListener('click', () => { select(v); b.blur(); });
+  return b;
+}
+function buildPalette() {
+  const grid = $('grid'), slot = $('transSlot');
+  grid.replaceChildren(); slot.replaceChildren();
+  if (transIdx >= 0) {
+    const t = swatch(transIdx, '`', `Transparent ${hexOf(img.entries[transIdx].rgba)}  key \``);
+    t.classList.add('trans');
+    slot.append(t);
+  }
+  pal.slice(0, MAX_SWATCHES).forEach((v, n) => {
+    const k = keyLabel(n);
+    grid.append(swatch(v, k, `${hexOf(img.entries[v].rgba)}${k ? '  key ' + k.replace('⇧', 'Shift+') : ''}`));
+  });
+  if (pal.length > MAX_SWATCHES) say(`This file has ${pal.length} colours; the first ${MAX_SWATCHES} are shown.`, 8000);
+  markSelected();
+}
+function markSelected() {
+  document.querySelectorAll('.swatch').forEach(s => s.classList.toggle('sel', +s.dataset.v === cur));
+}
+function select(v) {
+  if (v === undefined || v < 0 || v === frameIdx) return;
+  cur = v; markSelected();
+}
+function navPalette(key) {
+  const n = pal.length;
+  let pos = cur === transIdx ? -1 : pal.indexOf(cur);
+  if (pos < -1) pos = 0;
+  if (key === 'ArrowRight') pos = pos === -1 ? 0 : Math.min(n - 1, pos + 1);
+  else if (key === 'ArrowLeft') pos = pos <= 0 ? (transIdx >= 0 ? -1 : 0) : pos - 1;
+  else if (key === 'ArrowDown') pos = pos === -1 ? 0 : (pos + 10 < n ? pos + 10 : pos);
+  else if (key === 'ArrowUp') pos = pos >= 10 ? pos - 10 : pos;
+  if (n === 0 && pos >= 0) return;
+  select(pos === -1 ? transIdx : pal[pos]);
+}
+
+// ---------- tools ----------
+function setTool(t) {
+  if (t !== 'pick') prevTool = t;
+  tool = t;
+  document.querySelectorAll('[data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
+}
+document.querySelectorAll('[data-tool]').forEach(b => b.addEventListener('click', () => { setTool(b.dataset.tool); b.blur(); }));
+
+function setPix(i, v) { img.pix[i] = v; writeRGBA(i, v); }
+function commitImage() { offCtx.putImageData(offImg, 0, 0); requestRender(); }
+
+function applyAt(x, y) {
+  if (!stroke || x < 0 || y < 0 || x >= img.w || y >= img.h) return;
+  const i = y * img.w + x;
+  if (img.pix[i] === frameIdx) return;                 // frame is locked
+  const v = stroke.mode === 'paint' ? cur : orig[i];
+  if (img.pix[i] === v) return;
+  if (!stroke.changes.has(i)) stroke.changes.set(i, img.pix[i]);
+  setPix(i, v);
+}
+function lineTo(x0, y0, x1, y1) {
+  const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1, dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  for (;;) {
+    applyAt(x0, y0);
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+}
+function pushUndo(changes) {
+  if (!changes.size) return;
+  const idx = new Uint32Array(changes.size), from = new Uint32Array(changes.size), to = new Uint32Array(changes.size);
+  let k = 0;
+  for (const [i, old] of changes) { idx[k] = i; from[k] = old; to[k] = img.pix[i]; k++; }
+  undoStack.push({ idx, from, to }); redoStack = [];
+  setDirty(true);
+}
+function fillAt(x, y, mode) {
+  if (x < 0 || y < 0 || x >= img.w || y >= img.h) return;
+  const w = img.w, start = y * w + x, target = img.pix[start];
+  if (target === frameIdx) return;
+  if (mode === 'paint' && (cur < 0 || target === cur)) return;
+  const region = [], mark = new Uint8Array(img.pix.length), stack = [start];
+  mark[start] = 1;
+  while (stack.length) {
+    const i = stack.pop(); region.push(i);
+    const px = i % w;
+    const nb = [px > 0 ? i - 1 : -1, px < w - 1 ? i + 1 : -1, i - w, i + w];
+    for (const j of nb) if (j >= 0 && j < img.pix.length && !mark[j] && img.pix[j] === target) { mark[j] = 1; stack.push(j); }
+  }
+  const changes = new Map();
+  for (const i of region) {
+    const v = mode === 'paint' ? cur : orig[i];
+    if (img.pix[i] !== v) { changes.set(i, img.pix[i]); setPix(i, v); }
+  }
+  pushUndo(changes); commitImage();
+  if (mode === 'restore' && !changes.size) say('That area already matches the original.');
+}
+function undo() { step(undoStack, redoStack, 'from'); }
+function redo() { step(redoStack, undoStack, 'to'); }
+function step(src, dst, field) {
+  const op = src.pop(); if (!op) return;
+  for (let k = 0; k < op.idx.length; k++) setPix(op.idx[k], op[field][k]);
+  dst.push(op); commitImage(); setDirty(true);
+}
+
+// ---------- view ----------
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  const r = view.getBoundingClientRect();
+  const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+  if (view.width !== w || view.height !== h) { view.width = w; view.height = h; render(); }
+  else requestRender();
+}
+new ResizeObserver(entries => {
+  const e = entries[0];
+  const box = e.devicePixelContentBoxSize && e.devicePixelContentBoxSize[0];
+  if (box) {
+    dpr = window.devicePixelRatio || 1;
+    if (view.width !== box.inlineSize || view.height !== box.blockSize) { view.width = box.inlineSize; view.height = box.blockSize; render(); }
+    else requestRender();
+  } else resize();
+}).observe(view);
+
+function fit() {
+  if (!img) return;
+  const m = 24 * dpr;
+  let best = ZOOMS[0];
+  for (const zz of ZOOMS) if (img.w * zz <= view.width - m && img.h * zz <= view.height - m) best = zz;
+  z = best;
+  ox = Math.round((view.width - img.w * z) / 2);
+  oy = Math.round((view.height - img.h * z) / 2);
+  updateZoomStatus(); requestRender();
+}
+function zoomAt(mx, my, dir) {
+  const i = ZOOMS.indexOf(z) + dir;
+  if (i < 0 || i >= ZOOMS.length) return;
+  const nz = ZOOMS[i];
+  const ix = (mx - ox) / z, iy = (my - oy) / z;
+  z = nz;
+  ox = Math.round(mx - ix * z); oy = Math.round(my - iy * z);
+  updateZoomStatus(); requestRender();
+}
+
+let renderQueued = false;
+function requestRender() { if (!renderQueued) { renderQueued = true; requestAnimationFrame(render); } }
+let checker = null;
+function render() {
+  renderQueued = false;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, view.width, view.height);
+  if (!img) return;
+  const W = img.w * z, H = img.h * z;
+  if (!checker) {
+    const c = document.createElement('canvas'); c.width = c.height = 16;
+    const k = c.getContext('2d'); k.fillStyle = '#3a3c44'; k.fillRect(0, 0, 16, 16);
+    k.fillStyle = '#2a2c33'; k.fillRect(0, 0, 8, 8); k.fillRect(8, 8, 8, 8);
+    checker = ctx.createPattern(c, 'repeat');
+  }
+  ctx.fillStyle = checker; ctx.fillRect(ox, oy, W, H);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(off, ox, oy, W, H);
+
+  // visible pixel range
+  const x0 = Math.max(0, Math.floor(-ox / z)), x1 = Math.min(img.w, Math.ceil((view.width - ox) / z));
+  const y0 = Math.max(0, Math.floor(-oy / z)), y1 = Math.min(img.h, Math.ceil((view.height - oy) / z));
+  if (z >= 8) {
+    ctx.globalAlpha = Math.min(1, (z - 6) / 6);
+    ctx.fillStyle = 'rgba(128,128,128,0.4)';
+    const top = oy + y0 * z, ht = (y1 - y0) * z, left = ox + x0 * z, wd = (x1 - x0) * z;
+    for (let x = x0; x <= x1; x++) ctx.fillRect(ox + x * z, top, 1, ht);
+    for (let y = y0; y <= y1; y++) ctx.fillRect(left, oy + y * z, wd, 1);
+    ctx.globalAlpha = 1;
+  }
+  if (hover && z >= 4 && !pan) {
+    const px = ox + hover.x * z, py = oy + hover.y * z, t = Math.max(1, Math.round(dpr));
+    ctx.fillStyle = '#000'; strokeBox(px - t, py - t, z + 2 * t, z + 2 * t, t);
+    ctx.fillStyle = '#fff'; strokeBox(px, py, z, z, t);
+  }
+}
+function strokeBox(x, y, w, h, t) {
+  ctx.fillRect(x, y, w, t); ctx.fillRect(x, y + h - t, w, t);
+  ctx.fillRect(x, y, t, h); ctx.fillRect(x + w - t, y, t, h);
+}
+
+// ---------- pointer ----------
+function devPos(e) {
+  const r = view.getBoundingClientRect();
+  return [(e.clientX - r.left) * (view.width / r.width), (e.clientY - r.top) * (view.height / r.height)];
+}
+function imgPos(e) {
+  const [mx, my] = devPos(e);
+  return { x: Math.floor((mx - ox) / z), y: Math.floor((my - oy) / z) };
+}
+view.addEventListener('contextmenu', e => e.preventDefault());
+view.addEventListener('pointerdown', e => {
+  if (!img) return;
+  e.preventDefault();
+  if (e.button === 1 || (e.button === 0 && spaceDown)) {
+    pan = { sx: e.clientX, sy: e.clientY, ox, oy };
+    view.classList.add('grabbing'); view.setPointerCapture(e.pointerId);
+    return;
+  }
+  if (e.button !== 0 && e.button !== 2) return;
+  const p = imgPos(e);
+  const mode = e.button === 2 ? 'restore' : 'paint';
+  if (tool === 'pick') {
+    if (e.button !== 0 || p.x < 0 || p.y < 0 || p.x >= img.w || p.y >= img.h) return;
+    const v = img.pix[p.y * img.w + p.x];
+    if (v === frameIdx) { say('That is the frame colour; it can\'t be picked.'); return; }
+    select(v); setTool(prevTool);
+    return;
+  }
+  if (tool === 'fill') { fillAt(p.x, p.y, mode); return; }
+  if (mode === 'paint' && cur < 0) return;
+  stroke = { mode, changes: new Map(), last: p, id: e.pointerId };
+  view.setPointerCapture(e.pointerId);
+  applyAt(p.x, p.y); commitImage();
+});
+view.addEventListener('pointermove', e => {
+  if (!img) return;
+  if (pan) {
+    ox = pan.ox + Math.round((e.clientX - pan.sx) * dpr);
+    oy = pan.oy + Math.round((e.clientY - pan.sy) * dpr);
+    requestRender(); return;
+  }
+  const p = imgPos(e);
+  const inside = p.x >= 0 && p.y >= 0 && p.x < img.w && p.y < img.h;
+  if (stroke) { lineTo(stroke.last.x, stroke.last.y, p.x, p.y); stroke.last = p; commitImage(); }
+  const nh = inside ? p : null;
+  if ((nh && (!hover || hover.x !== nh.x || hover.y !== nh.y)) || (!nh && hover)) { hover = nh; updateHoverStatus(); requestRender(); }
+});
+function endPointer(e) {
+  if (pan) { pan = null; view.classList.remove('grabbing'); requestRender(); }
+  if (stroke) { pushUndo(stroke.changes); stroke = null; }
+  try { view.releasePointerCapture(e.pointerId); } catch (_) {}
+}
+view.addEventListener('pointerup', endPointer);
+view.addEventListener('pointercancel', endPointer);
+view.addEventListener('pointerleave', () => { if (!stroke && !pan && hover) { hover = null; updateHoverStatus(); requestRender(); } });
+
+let wheelAcc = 0;
+view.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (!img) return;
+  const d = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 300 : 1);
+  wheelAcc += d;
+  if (Math.abs(wheelAcc) < 40) return;
+  const [mx, my] = devPos(e);
+  zoomAt(mx, my, wheelAcc < 0 ? 1 : -1);
+  wheelAcc = 0;
+}, { passive: false });
+
+// ---------- keyboard ----------
+window.addEventListener('keydown', e => {
+  const mod = e.ctrlKey || e.metaKey;
+  const k = e.key.toLowerCase();
+  if (mod) {
+    if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+    else if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); redo(); }
+    else if (k === 's') { e.preventDefault(); save(); }
+    else if (k === 'o') { e.preventDefault(); openFile(); }
+    return;
+  }
+  if (e.altKey) return;
+  if (e.code === 'Space') { e.preventDefault(); if (!spaceDown) { spaceDown = true; view.classList.add('grab'); } return; }
+  const dm = /^Digit(\d)$/.exec(e.code);
+  if (dm) { e.preventDefault(); const d = +dm[1]; let n = d === 0 ? 9 : d - 1; if (e.shiftKey) n += 10; if (n < pal.length) select(pal[n]); return; }
+  if (e.code === 'Backquote') { e.preventDefault(); select(transIdx); return; }
+  if (e.key.startsWith('Arrow')) { e.preventDefault(); navPalette(e.key); return; }
+  if (e.code === 'KeyB') setTool('pencil');
+  else if (e.code === 'KeyG') setTool('fill');
+  else if (e.code === 'KeyI') setTool('pick');
+  else if (e.key === 'Home') { e.preventDefault(); fit(); }
+});
+window.addEventListener('keyup', e => {
+  if (e.code === 'Space') { spaceDown = false; view.classList.remove('grab'); }
+});
+window.addEventListener('blur', () => { spaceDown = false; view.classList.remove('grab'); });
+
+// ---------- status ----------
+function updateHoverStatus() {
+  if (!hover || !img) { $('sPos').innerHTML = 'x –  y –'; $('sCol').innerHTML = ''; return; }
+  $('sPos').innerHTML = `x <b>${hover.x}</b>  y <b>${hover.y}</b>`;
+  const v = img.pix[hover.y * img.w + hover.x], c = img.entries[v].rgba;
+  const tag = v === frameIdx ? ' <span class="tag">frame</span>' : v === transIdx ? ' <span class="tag">transparent</span>' : '';
+  const changed = img.pix[hover.y * img.w + hover.x] !== orig[hover.y * img.w + hover.x] ? ' <span class="tag">edited</span>' : '';
+  $('sCol').innerHTML = `<span class="chip" style="background:rgba(${c[0]},${c[1]},${c[2]},${c[3] / 255})"></span><b>${hexOf(c)}</b>${tag}${changed}`;
+}
+function updateZoomStatus() { $('sZoom').innerHTML = `zoom <b>${z * 100}%</b>`; }
+function updateFileStatus() {
+  if (!img) { $('sFile').textContent = 'No file open'; return; }
+  $('sFile').innerHTML = `<b>${escapeHtml(fileName)}</b>${dirty ? ' <span class="dirty">●</span>' : ''}  ${img.w}×${img.h}  ${PNG.describe(img)}`;
+}
+function setDirty(d) { dirty = d; updateFileStatus(); }
+function escapeHtml(s) { return s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+
+// ---------- open ----------
+const topLevel = (() => { try { return window.self === window.top; } catch (_) { return false; } })();
+function guardUnsaved() {
+  if (!dirty) return true;
+  if (Date.now() - openArmed < 5000) { openArmed = 0; return true; }
+  openArmed = Date.now();
+  say('You have unsaved changes. Open again within 5 seconds to discard them.', 5000);
+  return false;
+}
+async function openFile() {
+  if (!guardUnsaved()) return;
+  if (topLevel && window.showOpenFilePicker) {
+    try {
+      const [h] = await window.showOpenFilePicker({ types: [{ description: 'PNG image', accept: { 'image/png': ['.png'] } }] });
+      const f = await h.getFile();
+      await loadBytes(await f.arrayBuffer(), f.name, h);
+      return;
+    } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  $('fileIn').value = ''; $('fileIn').click();
+}
+$('fileIn').addEventListener('change', async () => {
+  const f = $('fileIn').files[0];
+  if (f) await loadBytes(await f.arrayBuffer(), f.name, null);
+});
+$('bOpen').addEventListener('click', e => { e.currentTarget.blur(); openFile(); });
+well.addEventListener('dragover', e => { e.preventDefault(); well.classList.add('drop'); });
+well.addEventListener('dragleave', () => well.classList.remove('drop'));
+well.addEventListener('drop', async e => {
+  e.preventDefault(); well.classList.remove('drop');
+  const item = e.dataTransfer.items && e.dataTransfer.items[0];
+  const f = e.dataTransfer.files[0];
+  if (!f) return;
+  if (!guardUnsaved()) return;
+  let handle = null;
+  if (topLevel && item && item.getAsFileSystemHandle) { try { handle = await item.getAsFileSystemHandle(); } catch (_) {} }
+  await loadBytes(await f.arrayBuffer(), f.name, handle);
+});
+
+// ---------- save ----------
+async function save() {
+  if (!img) return;
+  let bytes;
+  try { bytes = await PNG.encode(img); }
+  catch (e) { say(`Couldn't encode the PNG: ${e.message}`, 6000); return; }
+  const done = text => { setDirty(false); say(text); };
+
+  if (fileHandle && fileHandle.createWritable) {
+    try {
+      const wr = await fileHandle.createWritable();
+      await wr.write(bytes); await wr.close();
+      return done(`Saved ${fileName}`);
+    } catch (e) { if (e.name === 'AbortError' || e.name === 'NotAllowedError') { say('Save cancelled.'); return; } }
+  }
+  if (window.claude && window.claude.use) {
+    let dl = null;
+    try { dl = await window.claude.use('downloads'); } catch (_) {}
+    if (dl) {
+      try { await dl.save({ filename: fileName, data: new Blob([bytes], { type: 'image/png' }) }); return done(`Saved ${fileName}`); }
+      catch (e) {
+        if (e && e.code === 'declined') { say('Save cancelled.'); return; }
+        if (e && e.code === 'rate_limited') { say('A save prompt is already open.'); return; }
+        say(`Couldn't save: ${e && e.message ? e.message : 'unknown error'}`, 6000); return;
+      }
+    }
+  }
+  if (topLevel && window.showSaveFilePicker) {
+    try {
+      const h = await window.showSaveFilePicker({ suggestedName: fileName, types: [{ description: 'PNG image', accept: { 'image/png': ['.png'] } }] });
+      const wr = await h.createWritable(); await wr.write(bytes); await wr.close();
+      fileHandle = h; fileName = h.name || fileName;
+      return done(`Saved ${fileName}`);
+    } catch (e) { if (e.name === 'AbortError') { say('Save cancelled.'); return; } }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
+  a.download = fileName; document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  done(`Downloaded ${fileName}`);
+}
+$('bSave').addEventListener('click', e => { e.currentTarget.blur(); save(); });
+
+// ---------- start with the sample sheet ----------
+setTool('pencil');
+updateFileStatus();
+(async () => {
+  const bin = atob(SAMPLE_B64), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  resize();
+  await loadBytes(bytes.buffer, SAMPLE_NAME, null);
+})();
+</script>
